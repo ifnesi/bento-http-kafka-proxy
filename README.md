@@ -1,6 +1,6 @@
 # Kafka HTTP-to-Kafka REST Proxy with Bento
 
-A **production-ready**, lightweight HTTP proxy that bridges [Confluent‑style REST Proxy](https://docs.confluent.io/platform/current/kafka-rest/api.html#post--topics-(string-topic_name)-partitions-(int-partition_id)) `/topics/...` produce requests from HTTP directly into Kafka, supporting both JSON and AVRO payloads with [Confluent Schema Registry](https://docs.confluent.io/platform/current/schema-registry/index.html).
+A lightweight HTTP proxy that bridges [Confluent‑style REST Proxy](https://docs.confluent.io/platform/current/kafka-rest/api.html#post--topics-(string-topic_name)-partitions-(int-partition_id)) `/topics/...` produce requests from HTTP directly into Kafka, supporting both JSON and AVRO payloads with [Confluent Schema Registry](https://docs.confluent.io/platform/current/schema-registry/index.html).
 
 ## Features
 
