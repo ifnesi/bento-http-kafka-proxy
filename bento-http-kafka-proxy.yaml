@@ -1,0 +1,351 @@
+http:
+  address: ${HTTP_PROXY_HOST:0.0.0.0}:${HTTP_PROXY_PORT:4195}
+  enabled: true
+  root_path: /bento
+  debug_endpoints: false
+
+logger:
+  level: ${LOG_LEVEL:INFO}
+  format: json
+  add_timestamp: true
+  static_fields:
+    '@service': bento-http-kafka-proxy
+
+metrics:
+  prometheus: {}
+
+input:
+  http_server:
+    path: /topics/
+    allowed_verbs:
+      - POST
+    timeout: 30s
+    sync_response:
+      status: '${! meta("http_status").or("200") }'
+      headers:
+        Content-Type: 'application/vnd.kafka.v2+json'
+
+pipeline:
+  processors:
+    # Validate content-type and parse path
+    - mapping: |
+        # Try different metadata keys for content-type
+        let ct = meta("content-type").or(meta("Content-Type")).or(meta("http_server_request_content_type")).or("").lowercase()
+        let is_json = $ct.contains("json")
+        let is_avro = $ct.contains("avro")
+
+        # Reject unsupported content types (if content-type header exists and is not json/avro)
+        root = if $ct != "" && !$is_json && !$is_avro {
+          throw("unsupported content type: " + $ct)
+        }
+
+        let path = meta("http_server_request_path").or("")
+        let parts = $path.split("/")
+
+        # Extract topic from path (store in variable first)
+        let topic = if $parts.length() > 2 { $parts.index(2) } else { throw("topic missing from path") }
+        meta topic = $topic
+
+        meta path_partition = if $parts.length() > 4 && $parts.index(3) == "partitions" {
+          $parts.index(4)
+        } else {
+          ""
+        }
+
+        meta is_json = $is_json
+        meta is_avro = $is_avro
+
+        # Compute schema subject
+        let x_schema = meta("x-schema-subject").or(meta("X-Schema-Subject")).or("")
+        let schema_subject = if $x_schema != "" {
+          $x_schema
+        } else {
+          $topic + "-value"
+        }
+        meta schema_subject = $schema_subject
+
+        root = content().parse_json()
+
+    - catch:
+        - mapping: |
+            let err_msg = error().or("parsing error")
+            let err_lower = $err_msg.lowercase()
+
+            let status = if $err_lower.contains("unsupported content") || $err_lower.contains("content type") {
+              "415"
+            } else if $err_lower.contains("json") || $err_lower.contains("eof") || $err_lower.contains("parse") {
+              "400"
+            } else if $err_lower.contains("topic") || $err_lower.contains("path") {
+              "400"
+            } else {
+              "500"
+            }
+
+            meta http_status = $status
+
+            root = {
+              "error_code": $status.number(),
+              "message": $err_msg
+            }
+        - sync_response: {}
+        - mapping: 'root = deleted()'
+
+    # Validate and transform records
+    - mapping: |
+        root = if this.records == null || this.records.type() != "array" {
+          throw("payload must contain records array")
+        }
+
+        root = if this.records.length() == 0 {
+          throw("records array cannot be empty")
+        }
+
+        root = if this.records.length() > 10000 {
+          throw("too many records - max 10000")
+        }
+
+        let path_part = meta("path_partition")
+        root = this.records.map_each(record -> {
+          "key": record.key.or(null),
+          "value": if record.value == null { throw("record value cannot be null") } else { record.value },
+          "partition": if $path_part != "" {
+            $path_part
+          } else if record.partition != null {
+            record.partition.string()
+          } else {
+            ""
+          }
+        })
+
+    - catch:
+        - mapping: |
+            let err_msg = error().or("validation error")
+            let err_lower = $err_msg.lowercase()
+
+            let status = if $err_lower.contains("records") || $err_lower.contains("array") ||
+                          $err_lower.contains("empty") || $err_lower.contains("missing") ||
+                          $err_lower.contains("too many") || $err_lower.contains("value cannot be null") {
+              "400"
+            } else {
+              "500"
+            }
+
+            meta http_status = $status
+
+            root = {
+              "error_code": $status.number(),
+              "message": $err_msg
+            }
+        - sync_response: {}
+        - mapping: 'root = deleted()'
+
+    # Build HTTP response and save records for later
+    - mapping: |
+        # Save records array for Kafka processing
+        meta saved_records = this.format_json()
+
+        # Build HTTP response
+        let pp = meta("path_partition")
+        let p = if $pp != null && $pp != "" { $pp.number() } else { -1 }
+
+        let is_avro_resp = meta("is_avro")
+        root = {
+          "key_schema_id": null,
+          "value_schema_id": if $is_avro_resp != null && $is_avro_resp.bool() { 1 } else { null },
+          "offsets": [{
+            "partition": $p,
+            "offset": -1,
+            "error_code": null,
+            "error": null
+          }]
+        }
+
+    # Send response
+    - sync_response: {}
+
+    # Restore records for Kafka processing
+    - mapping: |
+        # Save metadata that needs to persist
+        let topic = meta("topic")
+        let is_json = meta("is_json")
+        let is_avro = meta("is_avro")
+        let schema_subject = meta("schema_subject")
+
+        # Restore records
+        root = meta("saved_records").parse_json()
+
+        # Restore metadata (parse_json might clear it)
+        meta topic = $topic
+        meta is_json = $is_json
+        meta is_avro = $is_avro
+        meta schema_subject = $schema_subject
+
+    # Store metadata values before unarchive (they don't survive unarchive)
+    - mapping: |
+        let topic = meta("topic")
+        meta stored_topic = $topic
+
+        let is_json_val = meta("is_json")
+        meta stored_is_json = if $is_json_val != null && $is_json_val.bool() { "true" } else { "false" }
+
+        let is_avro_val = meta("is_avro")
+        meta stored_is_avro = if $is_avro_val != null && $is_avro_val.bool() { "true" } else { "false" }
+
+        # Store schema_subject - for AVRO messages, validate it's not empty
+        let subject = meta("schema_subject")
+        let is_avro = $is_avro_val != null && $is_avro_val.bool()
+
+        meta stored_schema_subject = if $is_avro && ($subject == null || $subject == "") {
+          throw("AVRO message missing schema_subject")
+        } else if $subject != null && $subject != "" {
+          $subject
+        } else {
+          ""
+        }
+
+        root = this
+
+    # Split records for Kafka
+    - unarchive:
+        format: json_array
+
+    # Extract metadata for each record
+    - mapping: |
+        meta kafka_topic = meta("stored_topic")
+        meta kafka_key = if this.key != null { this.key.string() } else { deleted() }
+
+        # Set partition metadata only if explicitly specified
+        let part_val = this.partition
+        let has_part = $part_val != null && $part_val != ""
+        meta has_partition = if $has_part { "true" } else { "false" }
+        meta kafka_partition = if $has_part { $part_val.number() } else { deleted() }
+
+        # Note: Kafka headers are not currently supported
+        # The Confluent REST Proxy includes headers in the format:
+        # "headers": [{"name": "Header-1", "value": "base64-encoded-value"}]
+        # However, Bento's Bloblang doesn't support dynamic metadata key names,
+        # which would be required to map arbitrary header names to Kafka headers.
+        # This would require custom plugin development.
+
+        # Restore metadata lost in unarchive
+        meta is_json = meta("stored_is_json") == "true"
+        meta is_avro = meta("stored_is_avro") == "true"
+
+        let stored_subject = meta("stored_schema_subject")
+        meta schema_subject = if $stored_subject != null && $stored_subject != "" {
+          $stored_subject
+        } else {
+          ""
+        }
+
+        root = this.value
+
+    # AVRO encoding if needed
+    - switch:
+        - check: 'meta("is_avro") != null && meta("is_avro").bool()'
+          processors:
+            - schema_registry_encode:
+                url: ${SCHEMA_REGISTRY_URL}
+                subject: '${! meta("schema_subject") }'
+                refresh_period: 10m
+                avro_raw_json: true
+                basic_auth:
+                  enabled: true
+                  username: ${SCHEMA_REGISTRY_USERNAME}
+                  password: ${SCHEMA_REGISTRY_PASSWORD}
+            - catch:
+                - log:
+                    level: ERROR
+                    message: 'AVRO encoding FAILED - dropping message: ${! error() }'
+                - mapping: 'root = deleted()'
+        - check: 'meta("is_json") != null && meta("is_json").bool()'
+          processors:
+            - noop: {}
+        - processors:
+            - noop: {}
+
+output:
+  fallback:
+    - broker:
+        pattern: fan_out
+        outputs:
+          - switch:
+              cases:
+                # Use manual partitioner when partition is explicitly set
+                - check: 'meta("has_partition") == "true"'
+                  output:
+                    kafka_franz:
+                      seed_brokers:
+                        - ${KAFKA_BROKERS}
+                      topic: '${! meta("kafka_topic") }'
+                      key: '${! meta("kafka_key").or("") }'
+                      partitioner: manual
+                      partition: '${! meta("kafka_partition") }'
+                      compression: ${KAFKA_COMPRESSION:snappy}
+                      max_in_flight: ${KAFKA_MAX_IN_FLIGHT:10}
+                      batching:
+                        count: ${KAFKA_BATCH_COUNT:100}
+                        byte_size: ${KAFKA_BATCH_SIZE:1000000}
+                        period: ${KAFKA_BATCH_PERIOD:100ms}
+                      timeout: 30s
+                      tls:
+                        enabled: ${KAFKA_TLS_ENABLED:true}
+                      sasl:
+                        - mechanism: ${KAFKA_SASL_MECHANISM:PLAIN}
+                          username: ${KAFKA_USERNAME}
+                          password: ${KAFKA_PASSWORD}
+                # Use hash-based partitioner when partition not specified
+                - check: 'true'
+                  output:
+                    kafka_franz:
+                      seed_brokers:
+                        - ${KAFKA_BROKERS}
+                      topic: '${! meta("kafka_topic") }'
+                      key: '${! meta("kafka_key").or("") }'
+                      partitioner: murmur2_hash
+                      compression: ${KAFKA_COMPRESSION:snappy}
+                      max_in_flight: ${KAFKA_MAX_IN_FLIGHT:10}
+                      batching:
+                        count: ${KAFKA_BATCH_COUNT:100}
+                        byte_size: ${KAFKA_BATCH_SIZE:1000000}
+                        period: ${KAFKA_BATCH_PERIOD:100ms}
+                      timeout: 30s
+                      tls:
+                        enabled: ${KAFKA_TLS_ENABLED:true}
+                      sasl:
+                        - mechanism: ${KAFKA_SASL_MECHANISM:PLAIN}
+                          username: ${KAFKA_USERNAME}
+                          password: ${KAFKA_PASSWORD}
+
+    # Error response fallback
+    - drop: {}
+      processors:
+        - mapping: |
+            let msg = error().or("internal server error")
+            let err_lower = $msg.lowercase()
+
+            let status = if $err_lower.contains("unsupported content") || $err_lower.contains("content type") {
+              "415"
+            } else if $err_lower.contains("records") || $err_lower.contains("array") ||
+                      $err_lower.contains("empty") || $err_lower.contains("missing") ||
+                      $err_lower.contains("too many") {
+              "400"
+            } else if $err_lower.contains("schema") || $err_lower.contains("avro") ||
+                      $err_lower.contains("encoding") {
+              "422"
+            } else if $err_lower.contains("auth") || $err_lower.contains("unauthorized") {
+              "401"
+            } else if $err_lower.contains("timeout") {
+              "504"
+            } else {
+              "500"
+            }
+
+            meta http_status = $status
+
+            root = {
+              "error_code": $status.number(),
+              "message": $msg
+            }
+
+        - sync_response: {}
