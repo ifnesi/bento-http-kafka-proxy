@@ -1,26 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
 echo "=========================================="
-echo "Bento HTTP-Kafka Proxy Startup"
+echo "Bento HTTP-Kafka Proxy Startup Script     "
 echo "=========================================="
 echo ""
 
 # Check if .env file exists
 if [ ! -f .env ]; then
-    echo -e "${YELLOW}⚠${NC}  .env file not found!"
+    echo -e "⚠️ .env file not found!"
 
     if [ -f .env.example ]; then
-        echo -e "${GREEN}✓${NC} Copying .env.example to .env"
+        echo -e "✅ Copying .env.example to .env"
         cp .env.example .env
         echo ""
-        echo -e "${YELLOW}⚠${NC}  IMPORTANT: Please edit .env with your credentials:"
+        echo -e "⚠️ IMPORTANT: Please edit .env with your credentials:"
         echo ""
         echo "  Required variables to update:"
         echo "    - KAFKA_BROKERS"
@@ -32,14 +26,14 @@ if [ ! -f .env ]; then
         echo ""
         exit 1
     else
-        echo -e "${RED}✗${NC} .env.example file not found!"
+        echo -e "❌ .env.example file not found!"
         echo "Cannot create .env file. Please create it manually."
         exit 1
     fi
 fi
 
 # Source .env file
-echo -e "${GREEN}✓${NC} Loading configuration from .env"
+echo -e "✅ Loading configuration from .env"
 set -a
 source .env
 set +a
@@ -55,7 +49,7 @@ for var in "${REQUIRED_VARS[@]}"; do
 done
 
 if [ ${#MISSING_VARS[@]} -gt 0 ]; then
-    echo -e "${RED}✗${NC} Missing required environment variables:"
+    echo -e "❌ Missing required environment variables:"
     for var in "${MISSING_VARS[@]}"; do
         echo "    - $var"
     done
@@ -64,7 +58,7 @@ if [ ${#MISSING_VARS[@]} -gt 0 ]; then
     exit 1
 fi
 
-echo -e "${GREEN}✓${NC} Configuration validated"
+echo -e "✅ Configuration validated"
 echo ""
 
 # Start with docker compose
@@ -73,9 +67,15 @@ echo ""
 
 docker compose up -d
 
+# Check if Docker Compose command succeeded
+if [ $? -ne 0 ]; then
+    echo "❌ Failed to start the application with Docker Compose"
+    exit 1
+fi
+
 echo ""
 echo "=========================================="
-echo -e "${GREEN}✓${NC} Bento HTTP-Kafka Proxy started successfully!"
+echo -e "✅ Bento HTTP-Kafka Proxy started successfully!"
 echo "=========================================="
 echo ""
 echo "Health endpoints:"

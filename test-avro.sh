@@ -1,15 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
 # Source .env file
-echo -e "${GREEN}✓${NC} Loading configuration from .env"
+echo -e "✅ Loading configuration from .env"
 set -a
 source .env
 set +a
@@ -38,9 +31,9 @@ echo ""
 # Test 0: Check Schema Registry connectivity
 echo "Test 0: Schema Registry Connectivity"
 if curl -sf $SR_AUTH "$SCHEMA_REGISTRY_URL/subjects" > /dev/null; then
-    echo -e "${GREEN}✓${NC} Schema Registry accessible"
+    echo -e "✅ Schema Registry accessible"
 else
-    echo -e "${RED}✗${NC} Schema Registry not accessible"
+    echo -e "❌ Schema Registry not accessible"
     echo ""
     echo "Please check:"
     echo "  - SCHEMA_REGISTRY_URL is correct"
@@ -65,9 +58,9 @@ SCHEMA_RESPONSE=$(curl -s -X POST $SR_AUTH \
 
 if echo "$SCHEMA_RESPONSE" | grep -q '"id"'; then
     SCHEMA_ID=$(echo "$SCHEMA_RESPONSE" | grep -o '"id":[0-9]*' | cut -d':' -f2)
-    echo -e "${GREEN}✓${NC} Schema registered successfully (ID: $SCHEMA_ID)"
+    echo -e "✅ Schema registered successfully (ID: $SCHEMA_ID)"
 else
-    echo -e "${YELLOW}⚠${NC}  Schema might already exist or registration failed"
+    echo -e "⚠️ Schema might already exist or registration failed"
     echo "   Response: $SCHEMA_RESPONSE"
 fi
 
@@ -76,11 +69,11 @@ echo ""
 echo "Test 2: Verify schema exists in Schema Registry"
 LATEST_SCHEMA=$(curl -sf $SR_AUTH "$SCHEMA_REGISTRY_URL/subjects/$SCHEMA_SUBJECT/versions/latest")
 if echo "$LATEST_SCHEMA" | grep -q '"schema"'; then
-    echo -e "${GREEN}✓${NC} Schema exists and is retrievable"
+    echo -e "✅ Schema exists and is retrievable"
     SCHEMA_ID=$(echo "$LATEST_SCHEMA" | grep -o '"id":[0-9]*' | cut -d':' -f2)
     echo "   Schema ID: $SCHEMA_ID"
 else
-    echo -e "${RED}✗${NC} Schema not found"
+    echo -e "❌ Schema not found"
     echo "   Response: $LATEST_SCHEMA"
     FAILED=$((FAILED + 1))
 fi
@@ -113,10 +106,10 @@ RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
     }')
 
 if echo "$RESPONSE" | grep -q "offsets"; then
-    echo -e "${GREEN}✓${NC} AVRO message sent successfully"
+    echo -e "✅ AVRO message sent successfully"
     echo "   Response: $RESPONSE"
 else
-    echo -e "${RED}✗${NC} AVRO message failed"
+    echo -e "❌ AVRO message failed"
     echo "   Response: $RESPONSE"
     FAILED=$((FAILED + 1))
 fi
@@ -140,10 +133,10 @@ RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC/partitions/0" \
     }')
 
 if echo "$RESPONSE" | grep -q '"partition":0'; then
-    echo -e "${GREEN}✓${NC} AVRO message to partition 0 sent successfully"
+    echo -e "✅ AVRO message to partition 0 sent successfully"
     echo "   Response: $RESPONSE"
 else
-    echo -e "${RED}✗${NC} AVRO message to partition failed"
+    echo -e "❌ AVRO message to partition failed"
     echo "   Response: $RESPONSE"
     FAILED=$((FAILED + 1))
 fi
@@ -162,10 +155,10 @@ RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
     }')
 
 if echo "$RESPONSE" | grep -q "offsets"; then
-    echo -e "${GREEN}✓${NC} Multiple AVRO records sent successfully"
+    echo -e "✅ Multiple AVRO records sent successfully"
     echo "   Response: $RESPONSE"
 else
-    echo -e "${RED}✗${NC} Multiple AVRO records failed"
+    echo -e "❌ Multiple AVRO records failed"
     echo "   Response: $RESPONSE"
     FAILED=$((FAILED + 1))
 fi
@@ -182,7 +175,7 @@ CUSTOM_SCHEMA_RESPONSE=$(curl -s -X POST $SR_AUTH \
     -d "$SCHEMA_JSON")
 
 if echo "$CUSTOM_SCHEMA_RESPONSE" | grep -q '"id"'; then
-    echo -e "${GREEN}✓${NC} Custom schema subject registered: $CUSTOM_SUBJECT"
+    echo -e "✅ Custom schema subject registered: $CUSTOM_SUBJECT"
 
     RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
         -H "Content-Type: application/vnd.kafka.avro.v2+json" \
@@ -200,21 +193,21 @@ if echo "$CUSTOM_SCHEMA_RESPONSE" | grep -q '"id"'; then
         }')
 
     if echo "$RESPONSE" | grep -q "offsets"; then
-        echo -e "${GREEN}✓${NC} AVRO with custom subject sent successfully"
+        echo -e "✅ AVRO with custom subject sent successfully"
         echo "   Response: $RESPONSE"
     else
-        echo -e "${RED}✗${NC} AVRO with custom subject failed"
+        echo -e "❌ AVRO with custom subject failed"
         echo "   Response: $RESPONSE"
         FAILED=$((FAILED + 1))
     fi
 else
-    echo -e "${YELLOW}⚠${NC}  Custom schema registration skipped"
+    echo -e "⚠️ Custom schema registration skipped"
 fi
 
 # Test 7: Error handling - schema mismatch
 echo ""
 echo "Test 7: AVRO Schema Validation (type mismatch)"
-echo "   ${YELLOW}Note: Schema validation happens asynchronously after HTTP response${NC}"
+echo "   Note: Schema validation happens asynchronously after HTTP response"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$PROXY_URL/topics/$TOPIC" \
     -H "Content-Type: application/vnd.kafka.avro.v2+json" \
     -d '{
@@ -230,16 +223,16 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$PROXY_URL/topics/$TOPI
     }')
 
 if [ "$STATUS" = "200" ]; then
-    echo -e "${YELLOW}⚠${NC}  Schema mismatch accepted (200) - validation happens async"
-    echo "   ${YELLOW}Check logs for encoding errors: docker compose logs bento-http-kafka-proxy${NC}"
+    echo -e "⚠️ Schema mismatch accepted (200) - validation happens async"
+    echo "   Check logs for encoding errors: docker compose logs bento-http-kafka-proxy"
 else
-    echo -e "${GREEN}✓${NC} Schema mismatch rejected ($STATUS)"
+    echo -e "✅ Schema mismatch rejected ($STATUS)"
 fi
 
 # Test 8: Error handling - missing required field
 echo ""
 echo "Test 8: AVRO Schema Validation (missing field)"
-echo "   ${YELLOW}Note: Schema validation happens asynchronously after HTTP response${NC}"
+echo "   Note: Schema validation happens asynchronously after HTTP response"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$PROXY_URL/topics/$TOPIC" \
     -H "Content-Type: application/vnd.kafka.avro.v2+json" \
     -d '{
@@ -254,17 +247,17 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$PROXY_URL/topics/$TOPI
     }')
 
 if [ "$STATUS" = "200" ]; then
-    echo -e "${YELLOW}⚠${NC}  Missing field accepted (200) - validation happens async"
-    echo "   ${YELLOW}Check logs for encoding errors: docker compose logs bento-http-kafka-proxy${NC}"
+    echo -e "⚠️ Missing field accepted (200) - validation happens async"
+    echo "   Check logs for encoding errors: docker compose logs bento-http-kafka-proxy"
 else
-    echo -e "${GREEN}✓${NC} Missing field rejected ($STATUS)"
+    echo -e "✅ Missing field rejected ($STATUS)"
 fi
 
 # Summary
 echo ""
 echo "=========================================="
 if [ "$FAILED" -eq 0 ]; then
-    echo -e "${GREEN}All AVRO tests passed!${NC}"
+    echo -e "✅ All AVRO tests passed!"
     echo "=========================================="
     echo ""
     echo "Schema Subject: $SCHEMA_SUBJECT"
@@ -282,7 +275,7 @@ if [ "$FAILED" -eq 0 ]; then
     echo "  curl $SR_AUTH $SCHEMA_REGISTRY_URL/subjects/$SCHEMA_SUBJECT/versions"
     exit 0
 else
-    echo -e "${RED}$FAILED AVRO test(s) failed!${NC}"
+    echo -e "❌ $FAILED AVRO test(s) failed!"
     echo "=========================================="
     echo ""
     echo "To view logs:"
