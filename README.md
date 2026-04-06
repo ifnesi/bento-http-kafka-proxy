@@ -188,6 +188,10 @@ docker compose logs -f
 docker compose logs bento-http-kafka-proxy | grep -E "error.*schema|error.*avro|processor_error"
 
 # Stop the proxy
+# Using the stop script (recommended)
+./stop.sh
+
+# Or directly with Docker Compose
 docker compose down
 
 # Restart
