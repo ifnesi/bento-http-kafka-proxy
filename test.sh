@@ -9,6 +9,7 @@ set +a
 
 PROXY_URL="${PROXY_URL:-http://localhost:4195}"
 TOPIC="${TEST_TOPIC:-test-topic}"
+CONTENT_TYPE="application/vnd.kafka.json.v2+json"
 FAILED=0
 
 echo "=========================================="
@@ -51,7 +52,7 @@ fi
 echo ""
 echo "Test 3: POST JSON message to /topics/$TOPIC"
 RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
-    -H "Content-Type: application/vnd.kafka.json.v2+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     -d '{"records": [{"key": "test-key-1", "value": {"msg": "test message 1"}}]}')
 
 if echo "$RESPONSE" | grep -q "offsets"; then
@@ -67,7 +68,7 @@ fi
 echo ""
 echo "Test 4: POST JSON message to /topics/$TOPIC/partitions/0"
 RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC/partitions/0" \
-    -H "Content-Type: application/vnd.kafka.json.v2+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     -d '{"records": [{"value": {"msg": "partition 0 message"}}]}')
 
 if echo "$RESPONSE" | grep -q '"partition":0'; then
@@ -83,13 +84,14 @@ fi
 echo ""
 echo "Test 5: POST multiple records"
 RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
-    -H "Content-Type: application/vnd.kafka.json.v2+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     -d '{
         "records": [
             {"key": "key-1", "value": {"id": 1, "name": "Alice"}},
             {"key": "key-2", "value": {"id": 2, "name": "Bob"}},
             {"key": "key-3", "value": {"id": 3, "name": "Charlie"}},
-            {"key": "key-4", "value": {"id": 3, "name": "Test message with headers"}, "headers": [{"name": "Header-1","value": "SGVhZGVyLTE="},{"name": "Header-2","value": "SGVhZGVyLTI="}]}
+            {"key": "key-4", "value": {"id": 3, "name": "Test message with headers"}, "headers": {"Header-1": "Value-1", "Header-2": "Value-2"}},
+            {"key": "key-4", "value": {"id": 3, "name": "Test message with headers again"}, "headers": {"Header-3": "Value-3", "Header-4": "Value-4"}}
         ]
     }')
 
@@ -106,7 +108,7 @@ fi
 echo ""
 echo "Test 6: Error Handling - Empty body (should return 400)"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$PROXY_URL/topics/$TOPIC" \
-    -H "Content-Type: application/vnd.kafka.json.v2+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     -d '')
 
 if [ "$STATUS" = "400" ]; then
@@ -120,7 +122,7 @@ fi
 echo ""
 echo "Test 7: Error Handling - Missing records array (should return 400)"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$PROXY_URL/topics/$TOPIC" \
-    -H "Content-Type: application/vnd.kafka.json.v2+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     -d '{"data": [{"value": "test"}]}')
 
 if [ "$STATUS" = "400" ]; then
@@ -162,13 +164,13 @@ fi
 
 # application/vnd.kafka.json.v2+json
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$PROXY_URL/topics/$TOPIC" \
-    -H "Content-Type: application/vnd.kafka.json.v2+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     -d '{"records": [{"value": {"test": true}}]}')
 
 if [ "$STATUS" = "200" ]; then
-    echo -e "✅ application/vnd.kafka.json.v2+json accepted"
+    echo -e "✅ $CONTENT_TYPE accepted"
 else
-    echo -e "❌ application/vnd.kafka.json.v2+json returned $STATUS (expected 200)"
+    echo -e "❌ $CONTENT_TYPE returned $STATUS (expected 200)"
     FAILED=$((FAILED + 1))
 fi
 

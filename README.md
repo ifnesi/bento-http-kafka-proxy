@@ -107,6 +107,7 @@ Environment variables (see `.env.example` for a complete template):
 | `KAFKA_SASL_MECHANISM`  |    ❌    | SASL mechanism (default: `PLAIN`)                                              |
 | `KAFKA_API_KEY`         |    ✅    | SASL username (API key)                                                        |
 | `KAFKA_API_SECRET`      |    ✅    | SASL password (API secret)                                                     |
+| `KAFKA_CLIENT_ID`       |    ❌    | bento-http-kafka-proxy                                                         |
 
 ### Schema Registry
 | Variable                              | Required | Description                                                                    |
@@ -174,6 +175,9 @@ curl http://localhost:4195/bento/metrics
 
 # Run AVRO test suite (automatically loads config from .env, requires Schema Registry)
 ./test-avro.sh
+
+# Run Binary test suite (automatically loads config from .env)
+./test-binary.sh
 ```
 
 ---
@@ -208,6 +212,7 @@ curl -X POST http://localhost:4195/topics/test-topic \
 # Run tests
 ./test.sh         # JSON tests (no Schema Registry needed)
 ./test-avro.sh    # AVRO tests (requires Schema Registry)
+./test-binary.sh  # Binary payload base64 encoded (no Schema Registry needed)
 ```
 
 ---
@@ -284,6 +289,21 @@ Tests JSON payloads without Schema Registry:
 - Multiple records in one request
 - Error handling (empty body, missing records array, unsupported content-type)
 - Content-Type variations (`application/json`, `application/vnd.kafka.json.v2+json`)
+
+All tests validate proper HTTP status codes (200, 400, 415) and response format.
+
+### Binary Test Suite (`test-binary.sh`)
+
+Binary payload base64 encoded (no Schema Registry needed):
+
+```bash
+# Configuration is loaded from .env automatically
+./test-binary.sh
+```
+
+**Tests included:**
+- String value encoded as base64
+- Non-string value encoded as base64
 
 All tests validate proper HTTP status codes (200, 400, 415) and response format.
 
@@ -422,16 +442,26 @@ The proxy maps errors to appropriate HTTP status codes:
 
 1. **Offset Placeholder**: The HTTP response always returns `offset: -1` as a placeholder. The message IS written to Kafka successfully, but Bento cannot expose the broker-assigned offset in the sync response.
 
-2. **Kafka Headers Not Supported**: The Confluent REST Proxy format includes a `headers` array in record payloads:
-   ```json
-   {
-     "records": [{
-       "value": {...},
-       "headers": [{"name": "Header-1", "value": "base64-encoded-value"}]
-     }]
-   }
-   ```
-   **Headers are silently ignored** due to a Bento/Bloblang limitation - it cannot dynamically set metadata keys from variable names. Only the message `key` and `value` are sent to Kafka. The request will return `200 OK` but headers will be dropped. If you need header support, use Confluent's official REST Proxy.
+2. **Kafka Headers Not working properly**:
+  
+  Payload example with headers:
+  ```json
+  {
+    "records": [
+      {"key": "key-4", "value": {"id": 3, "name": "Test message with headers again"}, "headers": {"Header-3": "Value-3", "Header-4": "Value-4"}}
+    ]
+  }
+  ```
+  
+  Kafka headers are set as:
+  ```json
+  [
+    {
+      "key": "headers",
+      "value": "{\"Header-3\":\"Value-3\",\"Header-4\":\"Value-4\"}"
+    }
+  ]
+  ```
 
 3. **AVRO Schema Validation (Async)**: Detailed schema validation (type mismatches, missing required fields) happens asynchronously during AVRO encoding, after the HTTP response is sent. The proxy returns `200 OK` immediately to prevent timeout while waiting for Schema Registry. Invalid schemas will:
    - Return `200 OK` to the HTTP client

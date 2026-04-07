@@ -11,6 +11,7 @@ PROXY_URL="${PROXY_URL:-http://localhost:4195}"
 TOPIC="${TEST_TOPIC:-test-avro-topic}"
 SCHEMA_REGISTRY_URL="${SCHEMA_REGISTRY_URL:?SCHEMA_REGISTRY_URL must be set}"
 SCHEMA_SUBJECT="${TOPIC}-value"
+CONTENT_TYPE="application/vnd.kafka.avro.v2+json"
 FAILED=0
 
 # Schema Registry auth (optional)
@@ -82,7 +83,7 @@ fi
 echo ""
 echo "Test 3: POST AVRO message (dynamic subject: ${SCHEMA_SUBJECT})"
 RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
-    -H "Content-Type: application/vnd.kafka.avro.v2+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     -d '{
         "records": [
             {
@@ -118,7 +119,7 @@ fi
 echo ""
 echo "Test 4: POST AVRO message to specific partition"
 RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC/partitions/0" \
-    -H "Content-Type: application/vnd.kafka.avro.v2+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     -d '{
         "records": [
             {
@@ -145,7 +146,7 @@ fi
 echo ""
 echo "Test 5: POST multiple AVRO records in one request"
 RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
-    -H "Content-Type: application/vnd.kafka.avro.v2+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     -d '{
         "records": [
             {"value": {"id": 10, "message": "Record 1", "timestamp": 1712345678100}},
@@ -170,7 +171,7 @@ CUSTOM_SUBJECT="custom-test-value"
 
 # First register schema under custom subject
 CUSTOM_SCHEMA_RESPONSE=$(curl -s -X POST $SR_AUTH \
-    -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     "$SCHEMA_REGISTRY_URL/subjects/$CUSTOM_SUBJECT/versions" \
     -d "$SCHEMA_JSON")
 
@@ -178,7 +179,7 @@ if echo "$CUSTOM_SCHEMA_RESPONSE" | grep -q '"id"'; then
     echo -e "✅ Custom schema subject registered: $CUSTOM_SUBJECT"
 
     RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
-        -H "Content-Type: application/vnd.kafka.avro.v2+json" \
+        -H "Content-Type: $CONTENT_TYPE" \
         -H "X-Schema-Subject: $CUSTOM_SUBJECT" \
         -d '{
             "records": [
@@ -209,7 +210,7 @@ echo ""
 echo "Test 7: AVRO Schema Validation (type mismatch)"
 echo "   Note: Schema validation happens asynchronously after HTTP response"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$PROXY_URL/topics/$TOPIC" \
-    -H "Content-Type: application/vnd.kafka.avro.v2+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     -d '{
         "records": [
             {
@@ -234,7 +235,7 @@ echo ""
 echo "Test 8: AVRO Schema Validation (missing field)"
 echo "   Note: Schema validation happens asynchronously after HTTP response"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$PROXY_URL/topics/$TOPIC" \
-    -H "Content-Type: application/vnd.kafka.avro.v2+json" \
+    -H "Content-Type: $CONTENT_TYPE" \
     -d '{
         "records": [
             {

@@ -21,7 +21,7 @@ input:
       - POST
     timeout: 30s
     sync_response:
-      status: '${! meta("http_status").or("200") }'
+      status: '${! metadata("http_status").or("200") }'
       headers:
         Content-Type: 'application/vnd.kafka.v2+json'
 
@@ -30,16 +30,23 @@ pipeline:
     # Validate content-type and parse path
     - mapping: |
         # Try different metadata keys for content-type
-        let ct = meta("content-type").or(meta("Content-Type")).or(meta("http_server_request_content_type")).or("").lowercase()
-        let is_json = $ct.contains("json")
-        let is_avro = $ct.contains("avro")
+        let ct = metadata("content-type").or(metadata("Content-Type")).or(metadata("http_server_request_content_type")).or("").lowercase()
 
-        # Reject unsupported content types (if content-type header exists and is not json/avro)
-        root = if $ct != "" && !$is_json && !$is_avro {
+        # Binary Base64 payload, no schema
+        let is_binary_b64 = ($ct == "application/vnd.kafka.binary.v2+json")
+
+        # JSON payload, no schema
+        let is_json = ($ct == "application/vnd.kafka.json.v2+json") || ($ct == "application/json")
+
+        # JSON payload with AVRO schema
+        let is_avro = ($ct == "application/vnd.kafka.avro.v2+json")
+
+        # Reject unsupported content types (if content-type header exists and is not json/avro/binary)
+        root = if $ct != "" && !$is_json && !$is_avro && !$is_binary_b64 {
           throw("unsupported content type: " + $ct)
         }
 
-        let path = meta("http_server_request_path").or("")
+        let path = metadata("http_server_request_path").or("")
         let parts = $path.split("/")
 
         # Extract topic from path (store in variable first)
@@ -52,11 +59,12 @@ pipeline:
           ""
         }
 
+        meta is_binary_b64 = $is_binary_b64
         meta is_json = $is_json
         meta is_avro = $is_avro
 
         # Compute schema subject
-        let x_schema = meta("x-schema-subject").or(meta("X-Schema-Subject")).or("")
+        let x_schema = metadata("x-schema-subject").or(metadata("X-Schema-Subject")).or("")
         let schema_subject = if $x_schema != "" {
           $x_schema
         } else {
@@ -88,7 +96,8 @@ pipeline:
               "message": $err_msg
             }
         - sync_response: {}
-        - mapping: 'root = deleted()'
+        - mapping: |
+            root = deleted()
 
     # Validate and transform records
     - mapping: |
@@ -104,16 +113,30 @@ pipeline:
           throw("too many records - max 10000")
         }
 
-        let path_part = meta("path_partition")
+        let path_part = metadata("path_partition")
         root = this.records.map_each(record -> {
           "key": record.key.or(null),
-          "value": if record.value == null { throw("record value cannot be null") } else { record.value },
+          "value": if record.value == null {
+            throw("record value cannot be null")
+            } else {
+              # Base64 decode if binary, otherwise pass through (could be JSON or AVRO - schema registry encode will handle AVRO encoding later)
+            if metadata("is_binary_b64") != null && metadata("is_binary_b64").bool() {
+              record.value.decode("base64").string()
+            } else {
+              record.value
+            }
+          },
           "partition": if $path_part != "" {
             $path_part
           } else if record.partition != null {
             record.partition.string()
           } else {
             ""
+          },
+          "headers": if record.headers != null && record.headers.type() == "object" {
+            record.headers
+          } else {
+            {}
           }
         })
 
@@ -137,7 +160,8 @@ pipeline:
               "message": $err_msg
             }
         - sync_response: {}
-        - mapping: 'root = deleted()'
+        - mapping: |
+            root = deleted()
 
     # Build HTTP response and save records for later
     - mapping: |
@@ -145,10 +169,10 @@ pipeline:
         meta saved_records = this.format_json()
 
         # Build HTTP response
-        let pp = meta("path_partition")
+        let pp = metadata("path_partition")
         let p = if $pp != null && $pp != "" { $pp.number() } else { -1 }
 
-        let is_avro_resp = meta("is_avro")
+        let is_avro_resp = metadata("is_avro")
         root = {
           "key_schema_id": null,
           "value_schema_id": if $is_avro_resp != null && $is_avro_resp.bool() { 1 } else { null },
@@ -166,33 +190,38 @@ pipeline:
     # Restore records for Kafka processing
     - mapping: |
         # Save metadata that needs to persist
-        let topic = meta("topic")
-        let is_json = meta("is_json")
-        let is_avro = meta("is_avro")
-        let schema_subject = meta("schema_subject")
+        let topic = metadata("topic")
+        let is_binary_b64 = metadata("is_binary_b64")
+        let is_json = metadata("is_json")
+        let is_avro = metadata("is_avro")
+        let schema_subject = metadata("schema_subject")
 
         # Restore records
-        root = meta("saved_records").parse_json()
+        root = metadata("saved_records").parse_json()
 
         # Restore metadata (parse_json might clear it)
         meta topic = $topic
         meta is_json = $is_json
         meta is_avro = $is_avro
+        meta is_binary_b64 = $is_binary_b64
         meta schema_subject = $schema_subject
 
     # Store metadata values before unarchive (they don't survive unarchive)
     - mapping: |
-        let topic = meta("topic")
+        let topic = metadata("topic")
         meta stored_topic = $topic
 
-        let is_json_val = meta("is_json")
+        let is_json_val = metadata("is_json")
         meta stored_is_json = if $is_json_val != null && $is_json_val.bool() { "true" } else { "false" }
 
-        let is_avro_val = meta("is_avro")
+        let is_avro_val = metadata("is_avro")
         meta stored_is_avro = if $is_avro_val != null && $is_avro_val.bool() { "true" } else { "false" }
 
+        let is_binary_b64_val = metadata("is_binary_b64")
+        meta stored_is_binary_b64 = if $is_binary_b64_val != null && $is_binary_b64_val.bool() { "true" } else { "false" }
+
         # Store schema_subject - for AVRO messages, validate it's not empty
-        let subject = meta("schema_subject")
+        let subject = metadata("schema_subject")
         let is_avro = $is_avro_val != null && $is_avro_val.bool()
 
         meta stored_schema_subject = if $is_avro && ($subject == null || $subject == "") {
@@ -211,7 +240,7 @@ pipeline:
 
     # Extract metadata for each record
     - mapping: |
-        meta kafka_topic = meta("stored_topic")
+        meta kafka_topic = metadata("stored_topic")
         meta kafka_key = if this.key != null { this.key.string() } else { deleted() }
 
         # Set partition metadata only if explicitly specified
@@ -220,33 +249,46 @@ pipeline:
         meta has_partition = if $has_part { "true" } else { "false" }
         meta kafka_partition = if $has_part { $part_val.number() } else { deleted() }
 
-        # Note: Kafka headers are not currently supported
-        # The Confluent REST Proxy includes headers in the format:
-        # "headers": [{"name": "Header-1", "value": "base64-encoded-value"}]
-        # However, Bento's Bloblang doesn't support dynamic metadata key names,
-        # which would be required to map arbitrary header names to Kafka headers.
-        # This would require custom plugin development.
+        # Note: Kafka headers are not working properly
+        # Payload example with headers:
+        # {
+        #   "records": [
+        #      {"key": "key-4", "value": {"id": 3, "name": "Test message with headers again"}, "headers": {"Header-3": "Value-3", "Header-4": "Value-4"}}
+        #   ]
+        # }
+        # Kafka headers are set as:
+        # [
+        #    {
+        #      "key": "headers",
+        #      "value": "{\"Header-3\":\"Value-3\",\"Header-4\":\"Value-4\"}"
+        #    }
+        # ]
 
         # Restore metadata lost in unarchive
-        meta is_json = meta("stored_is_json") == "true"
-        meta is_avro = meta("stored_is_avro") == "true"
+        meta is_json = metadata("stored_is_json") == "true"
+        meta is_avro = metadata("stored_is_avro") == "true"
+        meta is_binary_b64 = metadata("stored_is_binary_b64") == "true"
 
-        let stored_subject = meta("stored_schema_subject")
+        let stored_subject = metadata("stored_schema_subject")
         meta schema_subject = if $stored_subject != null && $stored_subject != "" {
           $stored_subject
         } else {
           ""
         }
 
+        # Set payload headers as metadata
+        meta headers = if this.headers != {} { this.headers } else { deleted() }
+
+        # Set the root to the record value for further processing
         root = this.value
 
     # AVRO encoding if needed
     - switch:
-        - check: 'meta("is_avro") != null && meta("is_avro").bool()'
+        - check: 'metadata("is_avro") != null && metadata("is_avro").bool()'
           processors:
             - schema_registry_encode:
                 url: ${SCHEMA_REGISTRY_URL}
-                subject: '${! meta("schema_subject") }'
+                subject: '${! metadata("schema_subject") }'
                 refresh_period: 10m
                 avro_raw_json: true
                 basic_auth:
@@ -258,7 +300,7 @@ pipeline:
                     level: ERROR
                     message: 'AVRO encoding FAILED - dropping message: ${! error() }'
                 - mapping: 'root = deleted()'
-        - check: 'meta("is_json") != null && meta("is_json").bool()'
+        - check: 'metadata("is_json") != null && metadata("is_json").bool()'
           processors:
             - noop: {}
         - processors:
@@ -272,15 +314,18 @@ output:
           - switch:
               cases:
                 # Use manual partitioner when partition is explicitly set
-                - check: 'meta("has_partition") == "true"'
+                - check: 'metadata("has_partition") == "true"'
                   output:
                     kafka_franz:
                       seed_brokers:
                         - ${KAFKA_BROKERS}
-                      topic: '${! meta("kafka_topic") }'
-                      key: '${! meta("kafka_key").or("") }'
+                      topic: '${! metadata("kafka_topic") }'
+                      client_id: ${KAFKA_CLIENT_ID:"bento-http-kafka-proxy"}
+                      key: '${! metadata("kafka_key").or("") }'
                       partitioner: manual
-                      partition: '${! meta("kafka_partition") }'
+                      partition: '${! metadata("kafka_partition") }'
+                      metadata:
+                        include_prefixes: ["headers"]
                       compression: ${KAFKA_COMPRESSION:snappy}
                       max_in_flight: ${KAFKA_MAX_IN_FLIGHT:10}
                       batching:
@@ -300,9 +345,12 @@ output:
                     kafka_franz:
                       seed_brokers:
                         - ${KAFKA_BROKERS}
-                      topic: '${! meta("kafka_topic") }'
-                      key: '${! meta("kafka_key").or("") }'
+                      topic: '${! metadata("kafka_topic") }'
+                      client_id: ${KAFKA_CLIENT_ID:"bento-http-kafka-proxy"}
+                      key: '${! metadata("kafka_key").or("") }'
                       partitioner: murmur2_hash
+                      metadata:
+                        include_prefixes: ["headers"]
                       compression: ${KAFKA_COMPRESSION:snappy}
                       max_in_flight: ${KAFKA_MAX_IN_FLIGHT:10}
                       batching:
