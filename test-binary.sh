@@ -40,7 +40,7 @@ fi
 
 # Test 2: POST with Binary (non-string value base64-encoded)
 echo ""
-echo "Test 2: POST Binary message to /topics/$TOPIC/partitions/0"
+echo "Test 2: POST Binary message (non-string value) to /topics/$TOPIC"
 RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
     -H "Content-Type: $CONTENT_TYPE" \
     -d '{"records": [{"key": "binary-b64", "value": "3q2+7w=="}]}')
@@ -62,9 +62,6 @@ if [ "$FAILED" -eq 0 ]; then
     echo ""
     echo "To view metrics:"
     echo "  curl $PROXY_URL/bento/metrics"
-    echo ""
-    echo "To view logs:"
-    echo "  docker compose logs -f bento-http-kafka-proxy"
     exit 0
 else
     echo -e "❌ $FAILED test(s) failed!"

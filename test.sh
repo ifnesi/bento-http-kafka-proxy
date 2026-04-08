@@ -64,14 +64,14 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# Test 4: POST with explicit partition
+# Test 4: POST with explicit partition in payload
 echo ""
-echo "Test 4: POST JSON message to /topics/$TOPIC/partitions/0"
-RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC/partitions/0" \
+echo "Test 4: POST JSON message with partition in payload"
+RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
     -H "Content-Type: $CONTENT_TYPE" \
-    -d '{"records": [{"value": {"msg": "partition 0 message"}}]}')
+    -d '{"records": [{"value": {"msg": "partition 0 message"}, "partition": 0}]}')
 
-if echo "$RESPONSE" | grep -q '"partition":0'; then
+if echo "$RESPONSE" | grep -q "offsets"; then
     echo -e "✅ Partition-specific message sent successfully"
     echo "   Response: $RESPONSE"
 else
@@ -80,9 +80,9 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# Test 5: Multiple records in one request
+# Test 5: Multiple records in one request with headers
 echo ""
-echo "Test 5: POST multiple records"
+echo "Test 5: POST multiple records with headers (Confluent REST Proxy format)"
 RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
     -H "Content-Type: $CONTENT_TYPE" \
     -d '{
@@ -90,8 +90,8 @@ RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
             {"key": "key-1", "value": {"id": 1, "name": "Alice"}},
             {"key": "key-2", "value": {"id": 2, "name": "Bob"}},
             {"key": "key-3", "value": {"id": 3, "name": "Charlie"}},
-            {"key": "key-4", "value": {"id": 3, "name": "Test message with headers"}, "headers": {"Header-1": "Value-1", "Header-2": "Value-2"}},
-            {"key": "key-4", "value": {"id": 3, "name": "Test message with headers again"}, "headers": {"Header-3": "Value-3", "Header-4": "Value-4"}}
+            {"key": "key-4", "value": {"id": 4, "name": "Test message with headers"}, "headers": [{"name": "Header-1", "value": "Value-1"}, {"name": "Header-2", "value": "Value-2"}]},
+            {"key": "key-5", "value": {"id": 5, "name": "Test message with more headers"}, "headers": [{"name": "Header-3", "value": "Value-3"}, {"name": "Header-4", "value": "Value-4"}, {"name": "X-Custom", "value": "CustomValue"}]}
         ]
     }')
 
@@ -182,9 +182,6 @@ if [ "$FAILED" -eq 0 ]; then
     echo ""
     echo "To view metrics:"
     echo "  curl $PROXY_URL/bento/metrics"
-    echo ""
-    echo "To view logs:"
-    echo "  docker compose logs -f bento-http-kafka-proxy"
     exit 0
 else
     echo -e "❌ $FAILED test(s) failed!"

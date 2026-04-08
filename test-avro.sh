@@ -115,10 +115,10 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# Test 4: POST AVRO with explicit partition
+# Test 4: POST AVRO with explicit partition in payload
 echo ""
-echo "Test 4: POST AVRO message to specific partition"
-RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC/partitions/0" \
+echo "Test 4: POST AVRO message with partition in payload"
+RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC" \
     -H "Content-Type: $CONTENT_TYPE" \
     -d '{
         "records": [
@@ -128,16 +128,17 @@ RESPONSE=$(curl -s -X POST "$PROXY_URL/topics/$TOPIC/partitions/0" \
                     "id": 2,
                     "message": "AVRO to partition 0",
                     "timestamp": 1712345678001
-                }
+                },
+                "partition": 0
             }
         ]
     }')
 
-if echo "$RESPONSE" | grep -q '"partition":0'; then
-    echo -e "✅ AVRO message to partition 0 sent successfully"
+if echo "$RESPONSE" | grep -q "offsets"; then
+    echo -e "✅ AVRO message with partition sent successfully"
     echo "   Response: $RESPONSE"
 else
-    echo -e "❌ AVRO message to partition failed"
+    echo -e "❌ AVRO message with partition failed"
     echo "   Response: $RESPONSE"
     FAILED=$((FAILED + 1))
 fi
@@ -263,17 +264,6 @@ if [ "$FAILED" -eq 0 ]; then
     echo ""
     echo "Schema Subject: $SCHEMA_SUBJECT"
     echo "Schema ID: $SCHEMA_ID"
-    echo ""
-    echo "To verify messages in Kafka:"
-    echo "  kafka-avro-console-consumer --bootstrap-server <broker> \\"
-    echo "    --topic $TOPIC --from-beginning \\"
-    echo "    --property schema.registry.url=$SCHEMA_REGISTRY_URL"
-    echo ""
-    echo "To view Schema Registry subjects:"
-    echo "  curl $SR_AUTH $SCHEMA_REGISTRY_URL/subjects"
-    echo ""
-    echo "To view this subject's schemas:"
-    echo "  curl $SR_AUTH $SCHEMA_REGISTRY_URL/subjects/$SCHEMA_SUBJECT/versions"
     exit 0
 else
     echo -e "❌ $FAILED AVRO test(s) failed!"

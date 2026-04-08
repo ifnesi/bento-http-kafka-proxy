@@ -4,7 +4,7 @@ A lightweight HTTP proxy that bridges [Confluent‑style REST Proxy](https://doc
 
 ## Features
 
-- ✅ **Confluent REST Proxy API Compatible** - Drop-in replacement for `/topics/{topic}` and `/topics/{topic}/partitions/{partition}` endpoints
+- ✅ **Confluent REST Proxy API Compatible** - Drop-in replacement for `/topics/{topic}` endpoint with partition support via payload
 - ✅ **JSON & AVRO Support** - Automatic Schema Registry encoding with dynamic subject resolution
 - ✅ **Production Hardened** - Compression, batching, retries, request size limits, proper error handling
 - ✅ **Observability Ready** - Prometheus metrics, structured JSON logging, health checks
@@ -19,9 +19,8 @@ A lightweight HTTP proxy that bridges [Confluent‑style REST Proxy](https://doc
 Clients POST to:
 
 - `POST /topics/{topic}`
-- `POST /topics/{topic}/partitions/{partition}`
 
-The request body must follow [Confluent REST Proxy v2’s](https://docs.confluent.io/platform/current/kafka-rest/api.html#post--topics-(string-topic_name)-partitions-(int-partition_id)) `records` format:
+The request body must follow [Confluent REST Proxy v2’s](https://docs.confluent.io/platform/current/kafka-rest/api.html#post--topics-(string-topic_name)) `records` format:
 
 ```json
 {
@@ -32,10 +31,14 @@ The request body must follow [Confluent REST Proxy v2’s](https://docs.confluen
 }
 ```
 
+Partition assignment:
+- If `partition` field is specified in a record, it will be sent to that specific partition (manual partitioning)
+- If `partition` is not specified, the message will be partitioned using `murmur2_hash` based on the key
+
 [Bento http_server](https://warpstreamlabs.github.io/bento/docs/components/inputs/http_server/):
 
 1. Parses the HTTP request path and body.
-2. Extracts topic and optional partition (from path or `partition` field).
+2. Extracts topic from the path and optional partition from the `partition` field in each record.
 3. Optionally encodes the `value` as AVRO using Schema Registry, with a dynamic subject derived from the topic (e.g. `orders-value`).
 4. Publishes each record as a Kafka message.
 5. Returns a synchronous JSON response compatible with the Confluent REST Proxy response shape.
@@ -231,17 +234,32 @@ curl -X POST http://localhost:4195/topics/orders \
   }'
 ```
 
-### JSON with explicit partition
+### JSON with explicit partition in payload
 
 ```bash
-curl -X POST http://localhost:4195/topics/orders/partitions/1 \
+curl -X POST http://localhost:4195/topics/orders \
   -H "Content-Type: application/vnd.kafka.json.v2+json" \
   -d '{
     "records": [
-      { "key": "order-2", "value": { "id": 2, "status": "PENDING" } }
+      { "key": "order-2", "value": { "id": 2, "status": "PENDING" }, "partition": 1 }
     ]
   }'
 ```
+
+### JSON with mixed partitioning
+
+```bash
+curl -X POST http://localhost:4195/topics/orders \
+  -H "Content-Type: application/vnd.kafka.json.v2+json" \
+  -d '{
+    "records": [
+      { "key": "order-1", "value": { "id": 1, "status": "NEW" }, "partition": 0 },
+      { "key": "order-2", "value": { "id": 2, "status": "PENDING" } },
+      { "key": "order-3", "value": { "id": 3, "status": "SHIPPED" } }
+    ]
+  }'
+```
+Note: First record goes to partition 0, while records 2 and 3 use `murmur2_hash` partitioner based on their keys.
 
 ### AVRO with dynamic subject `${topic}-value`
 
@@ -442,26 +460,33 @@ The proxy maps errors to appropriate HTTP status codes:
 
 1. **Offset Placeholder**: The HTTP response always returns `offset: -1` as a placeholder. The message IS written to Kafka successfully, but Bento cannot expose the broker-assigned offset in the sync response.
 
-2. **Kafka Headers Not working properly**:
+2. **Kafka Headers**:
   
-  Payload example with headers:
+  Supported using the Confluent REST Proxy standard format:
   ```json
   {
     "records": [
-      {"key": "key-4", "value": {"id": 3, "name": "Test message with headers again"}, "headers": {"Header-3": "Value-3", "Header-4": "Value-4"}}
+      {
+        "key": "key-1",
+        "value": {"id": 1, "name": "Test"},
+        "headers": [
+          {"name": "X-Custom-Header", "value": "CustomValue"},
+          {"name": "X-Request-ID", "value": "12345"}
+        ]
+      }
     ]
   }
   ```
   
-  Kafka headers are set as:
+  Headers are sent to Kafka as a single header with key `headers` and value as a compact JSON array string:
   ```json
-  [
-    {
-      "key": "headers",
-      "value": "{\"Header-3\":\"Value-3\",\"Header-4\":\"Value-4\"}"
-    }
-  ]
+  {
+    "key": "headers",
+    "value": "[{\"name\":\"X-Custom-Header\",\"value\":\"CustomValue\"},{\"name\":\"X-Request-ID\",\"value\":\"12345\"}]"
+  }
   ```
+  
+  This preserves the Confluent REST Proxy format while allowing unlimited headers per message.
 
 3. **AVRO Schema Validation (Async)**: Detailed schema validation (type mismatches, missing required fields) happens asynchronously during AVRO encoding, after the HTTP response is sent. The proxy returns `200 OK` immediately to prevent timeout while waiting for Schema Registry. Invalid schemas will:
    - Return `200 OK` to the HTTP client

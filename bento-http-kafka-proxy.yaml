@@ -16,84 +16,75 @@ metrics:
 
 input:
   http_server:
-    path: /topics/
+    path: /topics/{topic}
     allowed_verbs:
       - POST
     timeout: 30s
     sync_response:
-      status: '${! metadata("http_status").or("200") }'
+      status: '${! metadata("mt_bento_http_status").or("200") }'
       headers:
         Content-Type: 'application/vnd.kafka.v2+json'
 
 pipeline:
   processors:
-    # Validate content-type and parse path
+    # Validate content-type and extract topic
     - mapping: |
-        # Try different metadata keys for content-type
-        let ct = metadata("content-type").or(metadata("Content-Type")).or(metadata("http_server_request_content_type")).or("").lowercase()
-
-        # Binary Base64 payload, no schema
-        let is_binary_b64 = ($ct == "application/vnd.kafka.binary.v2+json")
-
-        # JSON payload, no schema
-        let is_json = ($ct == "application/vnd.kafka.json.v2+json") || ($ct == "application/json")
-
-        # JSON payload with AVRO schema
-        let is_avro = ($ct == "application/vnd.kafka.avro.v2+json")
-
-        # Reject unsupported content types (if content-type header exists and is not json/avro/binary)
-        root = if $ct != "" && !$is_json && !$is_avro && !$is_binary_b64 {
-          throw("unsupported content type: " + $ct)
+        # Extract topic from path parameter
+        let vr_bento_topic = metadata("topic").or("")
+        root = if $vr_bento_topic == "" {
+          throw("topic missing from path")
         }
+        meta mt_bento_topic = $vr_bento_topic
 
-        let path = metadata("http_server_request_path").or("")
-        let parts = $path.split("/")
+        # Check the content-type
+        let vr_bento_ct = metadata("content-type").or(metadata("Content-Type")).or(metadata("http_server_request_content_type")).or("").lowercase()
 
-        # Extract topic from path (store in variable first)
-        let topic = if $parts.length() > 2 { $parts.index(2) } else { throw("topic missing from path") }
-        meta topic = $topic
-
-        meta path_partition = if $parts.length() > 4 && $parts.index(3) == "partitions" {
-          $parts.index(4)
+        # Determine content type for processing and encoding - default to JSON if not specified
+        let vr_bento_content_type = if $vr_bento_ct == "application/vnd.kafka.avro.v2+json" {
+          "avro"
+        } else if $vr_bento_ct == "application/vnd.kafka.binary.v2+json" {
+          "binary_b64"
+        } else if $vr_bento_ct == "application/vnd.kafka.json.v2+json" || $vr_bento_ct == "application/json" {
+          "json"
+        } else if $vr_bento_ct != "" {
+          throw("unsupported content type: " + $vr_bento_ct)
         } else {
-          ""
+          "json"
         }
-
-        meta is_binary_b64 = $is_binary_b64
-        meta is_json = $is_json
-        meta is_avro = $is_avro
+        meta mt_bento_content_type = $vr_bento_content_type
 
         # Compute schema subject
-        let x_schema = metadata("x-schema-subject").or(metadata("X-Schema-Subject")).or("")
-        let schema_subject = if $x_schema != "" {
-          $x_schema
+        let vr_bento_x_schema = metadata("x-schema-subject").or(metadata("X-Schema-Subject")).or("")
+        let vr_bento_schema_subject = if $vr_bento_x_schema != "" {
+          $vr_bento_x_schema
         } else {
-          $topic + "-value"
+          $vr_bento_topic + "-value"
         }
-        meta schema_subject = $schema_subject
+        meta mt_bento_schema_subject = $vr_bento_schema_subject
 
         root = content().parse_json()
 
     - catch:
+        # HTTP respond with appropriate error code based on the error message
         - mapping: |
-            let err_msg = error().or("parsing error")
-            let err_lower = $err_msg.lowercase()
+            let vr_bento_err_msg = error().or("parsing error")
+            let vr_bento_err_lower = $vr_bento_err_msg.lowercase()
 
-            let status = if $err_lower.contains("unsupported content") || $err_lower.contains("content type") {
+            let vr_bento_status = if $vr_bento_err_lower.contains("unsupported content") || $vr_bento_err_lower.contains("content type") {
               "415"
-            } else if $err_lower.contains("json") || $err_lower.contains("eof") || $err_lower.contains("parse") {
+            } else if $vr_bento_err_lower.contains("json") || $vr_bento_err_lower.contains("eof") || $vr_bento_err_lower.contains("parse") {
               "400"
-            } else if $err_lower.contains("topic") || $err_lower.contains("path") {
+            } else if $vr_bento_err_lower.contains("topic") || $vr_bento_err_lower.contains("path") {
               "400"
             } else {
               "500"
             }
 
-            meta http_status = $status
+            meta mt_bento_http_status = $vr_bento_status
 
             root = {
-              "error_code": $status.number(),
-              "message": $err_msg
+              "error_code": $vr_bento_status.number(),
+              "message": $vr_bento_err_msg
             }
         - sync_response: {}
         - mapping: |
@@ -113,51 +104,50 @@ pipeline:
           throw("too many records - max 10000")
         }
 
-        let path_part = metadata("path_partition")
+        let vr_bento_content_type = metadata("mt_bento_content_type")
         root = this.records.map_each(record -> {
           "key": record.key.or(null),
           "value": if record.value == null {
             throw("record value cannot be null")
             } else {
               # Base64 decode if binary, otherwise pass through (could be JSON or AVRO - schema registry encode will handle AVRO encoding later)
-            if metadata("is_binary_b64") != null && metadata("is_binary_b64").bool() {
+            if $vr_bento_content_type == "binary_b64" {
               record.value.decode("base64").string()
             } else {
               record.value
             }
           },
-          "partition": if $path_part != "" {
-            $path_part
-          } else if record.partition != null {
+          "partition": if record.partition != null {
             record.partition.string()
           } else {
             ""
           },
-          "headers": if record.headers != null && record.headers.type() == "object" {
+          "headers": if record.headers != null && record.headers.type() == "array" {
             record.headers
           } else {
-            {}
+            []
           }
         })
 
     - catch:
+        # HTTP respond with appropriate error code based on the error message
         - mapping: |
-            let err_msg = error().or("validation error")
-            let err_lower = $err_msg.lowercase()
+            let vr_bento_err_msg = error().or("validation error")
+            let vr_bento_err_lower = $vr_bento_err_msg.lowercase()
 
-            let status = if $err_lower.contains("records") || $err_lower.contains("array") ||
-                          $err_lower.contains("empty") || $err_lower.contains("missing") ||
-                          $err_lower.contains("too many") || $err_lower.contains("value cannot be null") {
+            let vr_bento_status = if $vr_bento_err_lower.contains("records") || $vr_bento_err_lower.contains("array") ||
+                          $vr_bento_err_lower.contains("empty") || $vr_bento_err_lower.contains("missing") ||
+                          $vr_bento_err_lower.contains("too many") || $vr_bento_err_lower.contains("value cannot be null") {
               "400"
             } else {
               "500"
             }
 
-            meta http_status = $status
+            meta mt_bento_http_status = $vr_bento_status
 
             root = {
-              "error_code": $status.number(),
-              "message": $err_msg
+              "error_code": $vr_bento_status.number(),
+              "message": $vr_bento_err_msg
             }
         - sync_response: {}
         - mapping: |
@@ -166,18 +156,15 @@ pipeline:
     # Build HTTP response and save records for later
     - mapping: |
         # Save records array for Kafka processing
-        meta saved_records = this.format_json()
+        meta mt_bento_saved_records = this.format_json()
 
         # Build HTTP response
-        let pp = metadata("path_partition")
-        let p = if $pp != null && $pp != "" { $pp.number() } else { -1 }
-
-        let is_avro_resp = metadata("is_avro")
+        let vr_bento_content_type = metadata("mt_bento_content_type")
         root = {
           "key_schema_id": null,
-          "value_schema_id": if $is_avro_resp != null && $is_avro_resp.bool() { 1 } else { null },
+          "value_schema_id": if $vr_bento_content_type == "avro" { 1 } else { null },
           "offsets": [{
-            "partition": $p,
+            "partition": -1,
             "offset": -1,
             "error_code": null,
             "error": null
@@ -190,44 +177,32 @@ pipeline:
     # Restore records for Kafka processing
     - mapping: |
         # Save metadata that needs to persist
-        let topic = metadata("topic")
-        let is_binary_b64 = metadata("is_binary_b64")
-        let is_json = metadata("is_json")
-        let is_avro = metadata("is_avro")
-        let schema_subject = metadata("schema_subject")
+        let vr_bento_topic = metadata("mt_bento_topic")
+        let vr_bento_content_type = metadata("mt_bento_content_type")
+        let vr_bento_schema_subject = metadata("mt_bento_schema_subject")
 
         # Restore records
-        root = metadata("saved_records").parse_json()
+        root = metadata("mt_bento_saved_records").parse_json()
 
         # Restore metadata (parse_json might clear it)
-        meta topic = $topic
-        meta is_json = $is_json
-        meta is_avro = $is_avro
-        meta is_binary_b64 = $is_binary_b64
-        meta schema_subject = $schema_subject
+        meta mt_bento_topic = $vr_bento_topic
+        meta mt_bento_content_type = $vr_bento_content_type
+        meta mt_bento_schema_subject = $vr_bento_schema_subject
 
     # Store metadata values before unarchive (they don't survive unarchive)
     - mapping: |
-        let topic = metadata("topic")
-        meta stored_topic = $topic
+        let vr_bento_topic = metadata("mt_bento_topic")
+        meta mt_bento_stored_topic = $vr_bento_topic
 
-        let is_json_val = metadata("is_json")
-        meta stored_is_json = if $is_json_val != null && $is_json_val.bool() { "true" } else { "false" }
-
-        let is_avro_val = metadata("is_avro")
-        meta stored_is_avro = if $is_avro_val != null && $is_avro_val.bool() { "true" } else { "false" }
-
-        let is_binary_b64_val = metadata("is_binary_b64")
-        meta stored_is_binary_b64 = if $is_binary_b64_val != null && $is_binary_b64_val.bool() { "true" } else { "false" }
+        let vr_bento_content_type = metadata("mt_bento_content_type")
+        meta mt_bento_stored_content_type = $vr_bento_content_type
 
         # Store schema_subject - for AVRO messages, validate it's not empty
-        let subject = metadata("schema_subject")
-        let is_avro = $is_avro_val != null && $is_avro_val.bool()
-
-        meta stored_schema_subject = if $is_avro && ($subject == null || $subject == "") {
+        let vr_bento_subject = metadata("mt_bento_schema_subject")
+        meta mt_bento_stored_schema_subject = if $vr_bento_content_type == "avro" && ($vr_bento_subject == null || $vr_bento_subject == "") {
           throw("AVRO message missing schema_subject")
-        } else if $subject != null && $subject != "" {
-          $subject
+        } else if $vr_bento_subject != null && $vr_bento_subject != "" {
+          $vr_bento_subject
         } else {
           ""
         }
@@ -240,55 +215,45 @@ pipeline:
 
     # Extract metadata for each record
     - mapping: |
-        meta kafka_topic = metadata("stored_topic")
-        meta kafka_key = if this.key != null { this.key.string() } else { deleted() }
+        meta mt_bento_kafka_topic = metadata("mt_bento_stored_topic")
+        meta mt_bento_kafka_key = if this.key != null { this.key.string() } else { deleted() }
 
         # Set partition metadata only if explicitly specified
-        let part_val = this.partition
-        let has_part = $part_val != null && $part_val != ""
-        meta has_partition = if $has_part { "true" } else { "false" }
-        meta kafka_partition = if $has_part { $part_val.number() } else { deleted() }
-
-        # Note: Kafka headers are not working properly
-        # Payload example with headers:
-        # {
-        #   "records": [
-        #      {"key": "key-4", "value": {"id": 3, "name": "Test message with headers again"}, "headers": {"Header-3": "Value-3", "Header-4": "Value-4"}}
-        #   ]
-        # }
-        # Kafka headers are set as:
-        # [
-        #    {
-        #      "key": "headers",
-        #      "value": "{\"Header-3\":\"Value-3\",\"Header-4\":\"Value-4\"}"
-        #    }
-        # ]
+        let vr_bento_part_val = this.partition
+        let vr_bento_has_part = $vr_bento_part_val != null && $vr_bento_part_val != ""
+        meta mt_bento_has_partition = if $vr_bento_has_part { "true" } else { "false" }
+        meta mt_bento_kafka_partition = if $vr_bento_has_part { $vr_bento_part_val.number() } else { deleted() }
 
         # Restore metadata lost in unarchive
-        meta is_json = metadata("stored_is_json") == "true"
-        meta is_avro = metadata("stored_is_avro") == "true"
-        meta is_binary_b64 = metadata("stored_is_binary_b64") == "true"
+        let vr_bento_content_type = metadata("mt_bento_stored_content_type")
+        meta mt_bento_content_type = $vr_bento_content_type
 
-        let stored_subject = metadata("stored_schema_subject")
-        meta schema_subject = if $stored_subject != null && $stored_subject != "" {
-          $stored_subject
+        let vr_bento_stored_subject = metadata("mt_bento_stored_schema_subject")
+        meta mt_bento_schema_subject = if $vr_bento_stored_subject != null && $vr_bento_stored_subject != "" {
+          $vr_bento_stored_subject
         } else {
           ""
         }
 
-        # Set payload headers as metadata
-        meta headers = if this.headers != {} { this.headers } else { deleted() }
+        # Store headers from Confluent REST Proxy format as Kafka header
+        # Confluent REST Proxy format: [{"name": "Header-1", "value": "Value-1"}, ...]
+        # Store as Kafka header with key="headers" and value=compact JSON (no newlines)
+        meta headers = if this.headers != null && this.headers.length() > 0 {
+          this.headers.string()
+        } else {
+          deleted()
+        }
 
         # Set the root to the record value for further processing
         root = this.value
 
-    # AVRO encoding if needed
+    # AVRO encoding if spcified via content-type and/or schema registry subject
     - switch:
-        - check: 'metadata("is_avro") != null && metadata("is_avro").bool()'
+        - check: 'metadata("mt_bento_content_type") == "avro"'
           processors:
             - schema_registry_encode:
                 url: ${SCHEMA_REGISTRY_URL}
-                subject: '${! metadata("schema_subject") }'
+                subject: '${! metadata("mt_bento_schema_subject") }'
                 refresh_period: 10m
                 avro_raw_json: true
                 basic_auth:
@@ -300,10 +265,11 @@ pipeline:
                     level: ERROR
                     message: 'AVRO encoding FAILED - dropping message: ${! error() }'
                 - mapping: 'root = deleted()'
-        - check: 'metadata("is_json") != null && metadata("is_json").bool()'
+        - check: 'metadata("mt_bento_content_type") == "json"'
           processors:
             - noop: {}
-        - processors:
+        - check: 'metadata("mt_bento_content_type") == "binary_b64"'
+          processors:
             - noop: {}
 
 output:
@@ -314,16 +280,16 @@ output:
           - switch:
               cases:
                 # Use manual partitioner when partition is explicitly set
-                - check: 'metadata("has_partition") == "true"'
+                - check: 'metadata("mt_bento_has_partition") == "true"'
                   output:
                     kafka_franz:
                       seed_brokers:
                         - ${KAFKA_BROKERS}
-                      topic: '${! metadata("kafka_topic") }'
+                      topic: '${! metadata("mt_bento_kafka_topic") }'
                       client_id: ${KAFKA_CLIENT_ID:"bento-http-kafka-proxy"}
-                      key: '${! metadata("kafka_key").or("") }'
+                      key: '${! metadata("mt_bento_kafka_key").or("") }'
                       partitioner: manual
-                      partition: '${! metadata("kafka_partition") }'
+                      partition: '${! metadata("mt_bento_kafka_partition") }'
                       metadata:
                         include_prefixes: ["headers"]
                       compression: ${KAFKA_COMPRESSION:snappy}
@@ -345,9 +311,9 @@ output:
                     kafka_franz:
                       seed_brokers:
                         - ${KAFKA_BROKERS}
-                      topic: '${! metadata("kafka_topic") }'
+                      topic: '${! metadata("mt_bento_kafka_topic") }'
                       client_id: ${KAFKA_CLIENT_ID:"bento-http-kafka-proxy"}
-                      key: '${! metadata("kafka_key").or("") }'
+                      key: '${! metadata("mt_bento_kafka_key").or("") }'
                       partitioner: murmur2_hash
                       metadata:
                         include_prefixes: ["headers"]
@@ -369,31 +335,31 @@ output:
     - drop: {}
       processors:
         - mapping: |
-            let msg = error().or("internal server error")
-            let err_lower = $msg.lowercase()
+            let vr_bento_msg = error().or("internal server error")
+            let vr_bento_err_lower = $vr_bento_msg.lowercase()
 
-            let status = if $err_lower.contains("unsupported content") || $err_lower.contains("content type") {
+            let vr_bento_status = if $vr_bento_err_lower.contains("unsupported content") || $vr_bento_err_lower.contains("content type") {
               "415"
-            } else if $err_lower.contains("records") || $err_lower.contains("array") ||
-                      $err_lower.contains("empty") || $err_lower.contains("missing") ||
-                      $err_lower.contains("too many") {
+            } else if $vr_bento_err_lower.contains("records") || $vr_bento_err_lower.contains("array") ||
+                      $vr_bento_err_lower.contains("empty") || $vr_bento_err_lower.contains("missing") ||
+                      $vr_bento_err_lower.contains("too many") {
               "400"
-            } else if $err_lower.contains("schema") || $err_lower.contains("avro") ||
-                      $err_lower.contains("encoding") {
+            } else if $vr_bento_err_lower.contains("schema") || $vr_bento_err_lower.contains("avro") ||
+                      $vr_bento_err_lower.contains("encoding") {
               "422"
-            } else if $err_lower.contains("auth") || $err_lower.contains("unauthorized") {
+            } else if $vr_bento_err_lower.contains("auth") || $vr_bento_err_lower.contains("unauthorized") {
               "401"
-            } else if $err_lower.contains("timeout") {
+            } else if $vr_bento_err_lower.contains("timeout") {
               "504"
             } else {
               "500"
             }
 
-            meta http_status = $status
+            meta mt_bento_http_status = $vr_bento_status
 
             root = {
-              "error_code": $status.number(),
-              "message": $msg
+              "error_code": $vr_bento_status.number(),
+              "message": $vr_bento_msg
             }
 
         - sync_response: {}
